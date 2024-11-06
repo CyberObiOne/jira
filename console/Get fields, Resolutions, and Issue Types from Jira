@@ -1,0 +1,50 @@
+// Name of the elements for which you want to get the id
+def issueTypesNames = ['Story']
+def fieldNames = ['Summary']
+def resolutionNames = ['Done']
+
+// Elements information maps
+def issueTypesMap = getIssueTypeIdsFromNames(issueTypesNames)
+def fieldsMap = getFieldIdsFromNames(fieldNames)
+def resolutionsMap = getResolutionsFromNames(resolutionNames)
+
+"IssueTypes: ${issueTypesMap} - Fields: ${fieldsMap} - Resolutions: ${resolutionsMap}"
+
+Map<String, String> getIssueTypeIdsFromNames(Collection<String> issueTypesNames) {
+    def result = issueTypesNames.collectEntries { issueTypeName ->
+        def issueTypeObject = get('/rest/api/2/issuetype')
+                .asObject(List)
+                .body.find {
+            (it as Map).name == issueTypeName
+        } as Map
+
+        issueTypeObject ? [(issueTypeName.toString()): issueTypeObject.id] : [:]
+    }
+    result as Map<String, String>
+}
+
+Map<String, String> getFieldIdsFromNames(Collection<String> fieldNames) {
+    def result = fieldNames.collectEntries { fieldName ->
+        def customFieldObject = get('/rest/api/2/field')
+                .asObject(List)
+                .body.find {
+            (it as Map).name == fieldName
+        } as Map
+
+        customFieldObject ? [(fieldName.toString()): customFieldObject.id] : [:]
+    }
+    result as Map<String, String>
+}
+
+Map<String, String> getResolutionsFromNames(Collection<String> resolutionNames) {
+    def result = resolutionNames.collectEntries { resolutionName ->
+        def resolutionObject = get('/rest/api/2/resolution')
+                .asObject(List)
+                .body.find {
+            (it as Map).name == resolutionName
+        } as Map
+
+        resolutionObject ? [(resolutionName.toString()): resolutionObject.id] : [:]
+    }
+    result as Map<String, String>
+}
