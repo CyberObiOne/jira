@@ -1,0 +1,17 @@
+ def myself = get('/rest/api/3/myself')
+    .header('Content-Type', 'application/json')
+    .asObject(Map)
+    .body
+
+def projectKey = 'TP'
+def roleId = '10002'
+def accountId = myself['accountId']
+
+def result = post("rest/api/3/project/${projectKey}/role/${roleId}")
+    .header('Content-Type', 'application/json')
+    .body([
+        "user": [accountId]
+    ])
+    .asObject(Map)
+
+result.body
