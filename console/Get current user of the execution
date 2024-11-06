@@ -1,0 +1,1 @@
+get("/rest/api/2/myself").asObject(Map).body
