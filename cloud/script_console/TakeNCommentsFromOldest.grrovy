@@ -1,0 +1,11 @@
+// Get an issue by its key
+def issue = Issues.getByKey("PROJECT-123")
+
+// Get the oldest 3 comments
+def oldestComments = issue.takeCommentsFromOldest(3)
+
+logger.info("Found ${oldestComments.size()} oldest comments:")
+
+oldestComments.each { comment ->
+    logger.info("Comment by ${comment.author.displayName}: ${comment.body}")
+}
