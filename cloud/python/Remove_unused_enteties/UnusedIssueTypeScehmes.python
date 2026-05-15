@@ -1,15 +1,20 @@
 import requests
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
-BASE_URL = "https://url.atlassian.net"
-AUTH = ("Mail", "Token")
+BASE_URL = "https://domain.atlassian.net"
+AUTH = ("E-MAIL", "Token")
 HEADERS = {"Accept": "application/json"}
 
 REQUEST_TIMEOUT = 30
-LOG_FILE = "unused_issue_types.log"
+MAX_WORKERS = 4
+APPLY = False            # ❗ SET True TO DELETE
+LOG_FILE = "issue_type_scheme_cleanup.log"
 
 # ==========================================================
 # LOGGING
@@ -18,97 +23,132 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # ==========================================================
-# SESSION
+# SESSION WITH RETRY / BACKOFF
 # ==========================================================
+retry = Retry(
+    total=5,
+    backoff_factor=1.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "DELETE"]
+)
+adapter = HTTPAdapter(max_retries=retry)
+
 session = requests.Session()
 session.auth = AUTH
 session.headers.update(HEADERS)
+session.mount("https://", adapter)
 
 # ==========================================================
-# GET ALL ISSUE TYPES
+# GET ALL ISSUE TYPE SCHEMES (PAGINATED)
 # ==========================================================
-def get_all_issue_types():
-    r = session.get(
-        f"{BASE_URL}/rest/api/3/issuetype",
-        timeout=REQUEST_TIMEOUT
-    )
-    r.raise_for_status()
-    return r.json()
-
-# ==========================================================
-# GET USED ISSUE TYPE IDS (MAPPING — PAGINATED ✅)
-# ==========================================================
-def get_used_issue_type_ids():
-    used_ids = set()
+def get_all_issue_type_schemes():
+    schemes = []
     start_at = 0
     max_results = 50
 
     while True:
         r = session.get(
-            f"{BASE_URL}/rest/api/3/issuetypescheme/mapping",
+            f"{BASE_URL}/rest/api/3/issuetypescheme",
             params={"startAt": start_at, "maxResults": max_results},
             timeout=REQUEST_TIMEOUT
         )
         r.raise_for_status()
-
         data = r.json()
-        values = data.get("values", [])
 
-        for m in values:
-            used_ids.add(str(m["issueTypeId"]))  # ✅ normalize
+        schemes.extend(data.get("values", []))
 
         if start_at + max_results >= data.get("total", 0):
             break
-
         start_at += max_results
 
-    return used_ids
+    return schemes
+
+# ==========================================================
+# GET ALL PROJECT IDS (ACTIVE + ARCHIVED)
+# ==========================================================
+def get_all_project_ids():
+    r = session.get(
+        f"{BASE_URL}/rest/api/3/project",
+        timeout=REQUEST_TIMEOUT
+    )
+    r.raise_for_status()
+    return [p["id"] for p in r.json()]
+
+# ==========================================================
+# GET ISSUE TYPE SCHEME USED BY A PROJECT
+# ==========================================================
+def get_scheme_for_project(project_id):
+    try:
+        r = session.get(
+            f"{BASE_URL}/rest/api/3/issuetypescheme/project",
+            params={"projectId": project_id},
+            timeout=REQUEST_TIMEOUT
+        )
+        r.raise_for_status()
+        values = r.json().get("values", [])
+        return {str(v["issueTypeScheme"]["id"]) for v in values}
+    except Exception as e:
+        logger.warning(f"Project {project_id} failed: {e}")
+        return set()
 
 # ==========================================================
 # MAIN
 # ==========================================================
 def main():
-    logger.info("Starting UNUSED Issue Type detection")
-    logger.info("Rules:")
-    logger.info(" - exclude PROJECT-scoped issue types")
-    logger.info(" - exclude issue types used in any scheme")
+    logger.info("Starting Issue Type Scheme cleanup (project-assignment based)")
+    logger.info(f"APPLY mode: {APPLY}")
 
-    all_issue_types = get_all_issue_types()
-    used_issue_type_ids = get_used_issue_type_ids()
+    schemes = get_all_issue_type_schemes()
+    projects = get_all_project_ids()
 
-    logger.info(f"Total Issue Types fetched: {len(all_issue_types)}")
-    logger.info(f"Issue Types used in schemes: {len(used_issue_type_ids)}")
+    logger.info(f"Total Issue Type Schemes fetched: {len(schemes)}")
+    logger.info(f"Total Projects fetched: {len(projects)}")
 
-    unused = []
+    used_scheme_ids = set()
+    completed = 0
 
-    for it in all_issue_types:
-        issue_type_id = str(it["id"])
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [
+            executor.submit(get_scheme_for_project, pid)
+            for pid in projects
+        ]
 
-        # ✅ Exclude project-scoped issue types
-        scope = it.get("scope")
-        if scope and scope.get("type") == "PROJECT":
-            continue
+        for future in as_completed(futures):
+            completed += 1
+            used_scheme_ids.update(future.result())
 
-        # ✅ Exclude issue types used in any scheme
-        if issue_type_id in used_issue_type_ids:
-            continue
+            if completed % 25 == 0 or completed == len(projects):
+                logger.info(f"Checked {completed}/{len(projects)} projects")
 
-        unused.append(it)
+    unused = [
+        s for s in schemes
+        if s["id"] != "1" and str(s["id"]) not in used_scheme_ids
+    ]
 
-    logger.info(f"Unused Issue Types found: {len(unused)}")
+    logger.info(f"Unused Issue Type Schemes found: {len(unused)}")
 
-    for it in unused:
-        logger.info(f"{it['name']} - {it['id']}")
+    for s in unused:
+        name = s["name"]
+        sid = s["id"]
 
-    logger.info("Unused Issue Type analysis finished")
+        if not APPLY:
+            logger.info(f"[DRY-RUN] Would delete Issue Type Scheme: {name} - {sid}")
+        else:
+            r = session.delete(
+                f"{BASE_URL}/rest/api/3/issuetypescheme/{sid}",
+                timeout=REQUEST_TIMEOUT
+            )
+            if r.status_code == 204:
+                logger.info(f"[DELETED] {name} - {sid}")
+            else:
+                logger.error(f"[FAILED] {name} - {sid} (HTTP {r.status_code})")
+
+    logger.info("Issue Type Scheme cleanup finished")
 
 # ==========================================================
 # ENTRY POINT
