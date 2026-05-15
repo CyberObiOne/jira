@@ -1,0 +1,117 @@
+import requests
+import logging
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
+BASE_URL = "https://url.atlassian.net"
+AUTH = ("Mail", "Token")
+HEADERS = {"Accept": "application/json"}
+
+REQUEST_TIMEOUT = 30
+LOG_FILE = "unused_issue_types.log"
+
+# ==========================================================
+# LOGGING
+# ==========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ==========================================================
+# SESSION
+# ==========================================================
+session = requests.Session()
+session.auth = AUTH
+session.headers.update(HEADERS)
+
+# ==========================================================
+# GET ALL ISSUE TYPES
+# ==========================================================
+def get_all_issue_types():
+    r = session.get(
+        f"{BASE_URL}/rest/api/3/issuetype",
+        timeout=REQUEST_TIMEOUT
+    )
+    r.raise_for_status()
+    return r.json()
+
+# ==========================================================
+# GET USED ISSUE TYPE IDS (MAPPING — PAGINATED ✅)
+# ==========================================================
+def get_used_issue_type_ids():
+    used_ids = set()
+    start_at = 0
+    max_results = 50
+
+    while True:
+        r = session.get(
+            f"{BASE_URL}/rest/api/3/issuetypescheme/mapping",
+            params={"startAt": start_at, "maxResults": max_results},
+            timeout=REQUEST_TIMEOUT
+        )
+        r.raise_for_status()
+
+        data = r.json()
+        values = data.get("values", [])
+
+        for m in values:
+            used_ids.add(str(m["issueTypeId"]))  # ✅ normalize
+
+        if start_at + max_results >= data.get("total", 0):
+            break
+
+        start_at += max_results
+
+    return used_ids
+
+# ==========================================================
+# MAIN
+# ==========================================================
+def main():
+    logger.info("Starting UNUSED Issue Type detection")
+    logger.info("Rules:")
+    logger.info(" - exclude PROJECT-scoped issue types")
+    logger.info(" - exclude issue types used in any scheme")
+
+    all_issue_types = get_all_issue_types()
+    used_issue_type_ids = get_used_issue_type_ids()
+
+    logger.info(f"Total Issue Types fetched: {len(all_issue_types)}")
+    logger.info(f"Issue Types used in schemes: {len(used_issue_type_ids)}")
+
+    unused = []
+
+    for it in all_issue_types:
+        issue_type_id = str(it["id"])
+
+        # ✅ Exclude project-scoped issue types
+        scope = it.get("scope")
+        if scope and scope.get("type") == "PROJECT":
+            continue
+
+        # ✅ Exclude issue types used in any scheme
+        if issue_type_id in used_issue_type_ids:
+            continue
+
+        unused.append(it)
+
+    logger.info(f"Unused Issue Types found: {len(unused)}")
+
+    for it in unused:
+        logger.info(f"{it['name']} - {it['id']}")
+
+    logger.info("Unused Issue Type analysis finished")
+
+# ==========================================================
+# ENTRY POINT
+# ==========================================================
+if __name__ == "__main__":
+    main()
