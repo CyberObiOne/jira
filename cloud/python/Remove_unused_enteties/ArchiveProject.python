@@ -1,0 +1,133 @@
+import requests
+import json
+import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
+BASE_URL = "https://domain.atlassian.net"
+AUTH = ("e_mail", "TOKEN")
+HEADERS = {"Accept": "application/json"}
+
+REQUEST_TIMEOUT = 30
+
+MODE = "archive"    # ✅ "restore" OR "archive"
+APPLY = True       # ✅ False = DRY-RUN, True = EXECUTE
+
+STATE_FILE = "archived_projects.json"
+
+# ==========================================================
+# LOGGING
+# ==========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ==========================================================
+# SESSION WITH RETRY
+# ==========================================================
+retry = Retry(
+    total=5,
+    backoff_factor=1.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"]
+)
+adapter = HTTPAdapter(max_retries=retry)
+
+session = requests.Session()
+session.auth = AUTH
+session.headers.update(HEADERS)
+session.mount("https://", adapter)
+
+# ==========================================================
+# GET ALL PROJECTS (ACTIVE + ARCHIVED)
+# ==========================================================
+def get_all_projects():
+    r = session.get(
+        f"{BASE_URL}/rest/api/3/project",
+        timeout=REQUEST_TIMEOUT
+    )
+    r.raise_for_status()
+    return r.json()
+
+# ==========================================================
+# MAIN
+# ==========================================================
+def main():
+    logger.info("Project archive manager started")
+    logger.info(f"MODE: {MODE.upper()}")
+    logger.info(f"APPLY: {APPLY}")
+
+    if MODE == "restore":
+        projects = get_all_projects()
+
+        archived = [
+            {
+                "id": p["id"],
+                "key": p["key"],
+                "name": p["name"]
+            }
+            for p in projects
+            if p.get("archived") is True
+        ]
+
+        logger.info(f"Archived projects found: {len(archived)}")
+
+        # ✅ Persist snapshot
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(archived, f, indent=2)
+
+        logger.info(f"Saved archived project snapshot to {STATE_FILE}")
+
+        for p in archived:
+            if not APPLY:
+                logger.info(f"[DRY-RUN] Would RESTORE project: {p['key']} ({p['id']})")
+            else:
+                r = session.post(
+                    f"{BASE_URL}/rest/api/3/project/{p['id']}/restore",
+                    timeout=REQUEST_TIMEOUT
+                )
+                if r.status_code == 204:
+                    logger.info(f"[RESTORED] {p['key']} ({p['id']})")
+                else:
+                    logger.error(
+                        f"[FAILED] {p['key']} ({p['id']}) HTTP {r.status_code}"
+                    )
+
+        logger.info("RESTORE phase completed")
+
+    elif MODE == "archive":
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            archived = json.load(f)
+
+        logger.info(f"Projects to archive: {len(archived)}")
+
+        for p in archived:
+            if not APPLY:
+                logger.info(f"[DRY-RUN] Would ARCHIVE project: {p['key']} ({p['id']})")
+            else:
+                r = session.post(
+                    f"{BASE_URL}/rest/api/3/project/{p['id']}/archive",
+                    timeout=REQUEST_TIMEOUT
+                )
+                if r.status_code == 204:
+                    logger.info(f"[ARCHIVED] {p['key']} ({p['id']})")
+                else:
+                    logger.error(
+                        f"[FAILED] {p['key']} ({p['id']}) HTTP {r.status_code}"
+                    )
+
+        logger.info("ARCHIVE phase completed")
+
+    else:
+        raise ValueError("MODE must be 'restore' or 'archive'")
+
+# ==========================================================
+# ENTRY POINT
+# ==========================================================
+if __name__ == "__main__":
+    main()
